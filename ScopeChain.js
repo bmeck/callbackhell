@@ -19,9 +19,6 @@ ScopeChain.fromAST = function (ast) {
           }
         }
         else {
-          if (node.callee.object.type === 'Identifier') {
-            current_scope.reference(node.callee.object.name, node);
-          }
           current_scope.call_at(node);
         }
       }
