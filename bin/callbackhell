@@ -12,3 +12,4 @@ var result = recast.print(require('../').hoist(recast.parse(source, {
   //sourceMapName: "map.json"
 });
 console.log(result.code)
+//console.log(result.map);

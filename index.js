@@ -7,7 +7,7 @@
 
 exports.hoist = callbackHoist;
 
-var traverse = require('ast-traverse');
+var ScopeChain = require('./ScopeChain').ScopeChain;
 
 function not(fn) {
   return function _not(v) {
@@ -19,93 +19,10 @@ function in_arr(arr) {
     return arr.indexOf(v) !== -1;
   }
 }
-
-var SCOPE_TYPE = {
-  GLOBAL:   "GLOBAL",
-  WITH:     "WITH",
-  FUNCTION: "FUNCTION",
-  CATCH:    "CATCH",
-  BLOCK:    "BLOCK"
-}
-var DECLARATION_TYPE = {
-  VAR:   "VAR",
-  CATCH: "CATCH",
-  LET:   "LET"
-}
-
-// Used to aggregate list of scopes, references, and originating nodes
-// THIS IS NOT USED TO INVESTIGATE / AGGREGATE COMPUTED STATE
-function ScopeChain(node, init, type, parent) {
-  this.node = node;
-  this.parent = parent || null;
-  this.children = [];
-  this.scope = null;
-  this.vars = Array.isArray(init) ? init.map(String) : init == null ? [] : [String(init)];
-  this.refs = [];
-  this.evals = [];
-  this.type = type || SCOPE_TYPE.FUNCTION;
-  return this;
-}
-ScopeChain.prototype.shadows = function (name) {
-  var scope = this;
-  while (scope) {
-    if (in_arr(scope.vars)(name)) {
-      return true;
-    }
-    scope = scope.parent;
+function on_obj(obj) {
+  return function (k) {
+    return Object.prototype.hasOwnProperty.call(obj, k);
   }
-  return false;
-}
-ScopeChain.prototype.eval_at = function (node) {
-  if (this.shadows('eval')) {
-    return;
-  }
-  var scope = this;
-  while (scope) {
-    scope.evals.push(node);
-    scope = scope.parent;
-  }
-}
-ScopeChain.prototype.child = function (node, init, type) {
-  var child = new ScopeChain(node, init, type, this);
-  this.children.push(child);
-  return child;
-}
-ScopeChain.prototype.declare = function (name, type) {
-  var scope = this;
-  while (scope) {
-    if (type === DECLARATION_TYPE.VAR) {
-      if (scope.type === SCOPE_TYPE.GLOBAL || scope.type === SCOPE_TYPE.FUNCTION) {
-        break;
-      }
-    }
-    if (type === DECLARATION_TYPE.CATCH) {
-      if (scope.type === SCOPE_TYPE.CATCH) {
-        break;
-      }
-    }
-    if (type === DECLARATION_TYPE.LET) {
-      if (scope.type === SCOPE_TYPE.GLOBAL || scope.type === SCOPE_TYPE.FUNCTION || scope.type === SCOPE_TYPE.BLOCK) {
-        // console.log('LET RESOLVED TO ', scope.node)
-        break;
-      }
-    }
-    scope = scope.parent;
-  }
-  if (scope) {
-    if (!in_arr(scope.vars)(name)) {
-      scope.vars.push(name);
-    }
-    else {
-      throw new Error('Double declaration');
-    }
-  }
-  else {
-    throw new Error('Invalid variable declaration type, no suitable scope container');
-  }
-}
-ScopeChain.prototype.reference = function (name) {
-  if (!in_arr(this.refs)(name)) this.refs.push(name);
 }
 
 // Used to handle COMPUTED STATE when we try to figure out what references are
@@ -119,120 +36,85 @@ function OuterRefChain(scope_chain, parent) {
     return new OuterRefChain(scope, this);
   }, this);
   this.outer_refs = this._outerReferences();
+  this.held_variables = this._heldVariables();
   return this;
 }
 OuterRefChain.prototype._outerReferences = function () {
-  var not_declared_here = not(in_arr(this.scope.vars));
-  var refs = this.children.reduce(function (refs, child) {
-    var new_refs = child.outer_refs
+  var not_declared_here = not(on_obj(this.scope.vars));
+  var $this = this;
+  return this.children.reduce(function (refs, child) {
+    var child_ref_names = Object.keys(child.outer_refs);
+    var new_refs = child_ref_names
       .filter(not_declared_here)
-      .filter(not(in_arr(refs)));
-    refs.push.apply(refs, new_refs);
+    return new_refs.reduce(function (refs, key) {
+      if (on_obj(refs)(key)) {
+        refs[key].push.apply(refs[key], child.outer_refs[key]);
+      }
+      else {
+        refs[key] = child.outer_refs[key].concat();
+      }
+      //console.log('REFS', refs)
+      return refs;
+    }, refs);
+  }, Object.keys($this.scope.refs).reduce(function (refs, key) {
+    refs[key] = $this.scope.refs[key].concat();
     return refs;
-  }, this.scope.refs.filter(not_declared_here));
-  return refs;
+  }, {}));
+}
+// find all variables that no other scope is holding and we own
+OuterRefChain.prototype._heldVariables = function () {
+  var $this = this;
+  var held = Object.keys(this.scope.vars).filter(function (name) {
+    return $this.children.length === 0 || !$this.children.some(function (child) {
+      if (name === 'limited_cleanup') {
+      }
+      return on_obj(child.outer_refs)(name);
+    })
+  });
+  return held;
 }
 
 //
 // Terrible code but works
 //
 function callbackHoist(ast, cb) {
-  // global scope
-  var root = new ScopeChain(null, null, SCOPE_TYPE.GLOBAL);
-  var current_scope = root;
-  // we make one pass to build all declarations and references
-  // no hoisting occurs
-  traverse(ast, {
-    pre: function (node, parent) {
-      node.$parent = parent;
-      if (node.type === 'CallExpression') {
-        // find direct evals
-        if (node.callee.type === 'Identifier' && node.callee.name === 'eval') {
-          current_scope.eval_at(node);
-        }
-      }
-      else if (node.type === 'Program') {
-        current_scope = current_scope.child(node, null, SCOPE_TYPE.GLOBAL);
-      }
-      else if (node.type === 'WithStatement') {
-        current_scope = current_scope.child(node, null, SCOPE_TYPE.WITH);
-      }
-      else if (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression') {
-        var vars = ['this', 'arguments'].concat(node.params.map(function (param) {
-          return param.name 
-        }));
-        if (node.id) {
-          vars.push(node.id.name)
-        }
-        if (node.type === 'FunctionDeclaration') {
-          current_scope.declare(node.id.name, DECLARATION_TYPE.VAR);
-        }
-        current_scope = current_scope.child(node, vars, SCOPE_TYPE.FUNCTION);
-      }
-      else if (node.type === 'CatchClause') {
-        current_scope = current_scope.child(node, [node.param.name], SCOPE_TYPE.CATCH);
-      }
-      else if (node.type === 'VariableDeclarator') {
-        if (parent.kind === 'var') {
-          current_scope.declare(node.id.name, DECLARATION_TYPE.VAR);
-        }
-        else if (parent.kind === 'let') {
-          current_scope.declare(node.id.name, DECLARATION_TYPE.LET);
-        }
-        else {
-          throw new Error('Unknown variable declaration ' + parent.kind);
-        }
-      }
-      else if (node.type === 'Identifier') {
-        var exempt = ['CatchClause', 'FunctionDeclaration', 'VariableDeclarator', 'FunctionExpression'];
-        if (!in_arr(exempt)(parent.type)) {
-         current_scope.reference(node.name);
-        }
-      }
-      else {
-        // technically this will add block scope to things like Literal and ReturnStatement
-        // but no harm is done if it actually parses
-        var exempt = ['VariableDeclaration', 'File', 'Literal', 'ReturnStatement', 'ThrowStatement'];
-        if (!in_arr(exempt)(node.type)) {
-          // console.log('ADDING BLOCK SCOPE FOR', node.type, exempt)
-          current_scope = current_scope.child(node, [], SCOPE_TYPE.BLOCK);
-        }
-      }
-    },
-    post: function (node, parent, prop, index) {
-      if (current_scope.node !== node) {
-        return;
-      }
-      current_scope = current_scope.parent;
-    }
-  });
   
   // our walk function, used for the actual transformation part of things
+  var root = ScopeChain.fromAST(ast);
   
   function walk(outer_chain) {
     // doing post traversal
     outer_chain.children.forEach(walk);
     var scope = outer_chain.scope;
+    if (scope.throws.length) {
+      scope.throws.forEach(function (throwing_node) {
+        // TODO: the cleanup
+        // console.log('COULD CLEANUP', outer_chain.held_variables.filter(function (name) {
+          // // don't cleanup init intrinsics
+          // return !in_arr(outer_chain.scope.init)(name)
+        //}), scope.type, scope.node.id && scope.node.id.name, scope.node.type, 'from', throwing_node.loc)
+      });
+    }
     if (scope && scope.evals.length === 0) {
       // can be hoisted
       var var_container;
       var container = scope.parent;
       // we need a function
       // it needs a name
-      if (container && scope.type === SCOPE_TYPE.FUNCTION && scope.node.id) {
+      if (container && scope.type === ScopeChain.SCOPE_TYPE.FUNCTION && scope.node.id) {
         var outer_refs = outer_chain.outer_refs;
         while (container) {
           // we have found the container that we are dependant on
           // console.log(scope.node.id.name, container.type);
-          if (container.vars.some(in_arr(outer_refs))) {
+          if (Object.keys(container.vars).some(on_obj(outer_refs))) {
             // console.log(scope.node.id.name, 'BLOCKED BY', container.vars.filter(in_arr(outer_refs)), container.type)
             break;
           }
-          if ((outer_refs.length && container.type === SCOPE_TYPE.WITH)) {
+          if ((Object.keys(outer_refs).length && container.type === ScopeChain.SCOPE_TYPE.WITH)) {
             // console.log(scope.node.id.name, 'BLOCKED BY WITH()')
             break;
           }
-          if ((container.type === SCOPE_TYPE.FUNCTION || container.type === SCOPE_TYPE.GLOBAL) && container.node) {
+          if ((container.type === ScopeChain.SCOPE_TYPE.FUNCTION || container.type === ScopeChain.SCOPE_TYPE.GLOBAL) && container.node) {
             var_container = container;
           }
           container = container.parent;
