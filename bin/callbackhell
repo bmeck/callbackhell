@@ -1,0 +1,14 @@
+#!/usr/bin/env node
+
+var recast = require('recast');
+
+var source = require('fs').readFileSync(process.argv[2]).toString();
+if (source.slice(0,2) === '#!') {
+  source = source.replace(/^[^\r\n]*/,'');
+}
+var result = recast.print(require('../').hoist(recast.parse(source, {
+  sourceFileName: "source.js"
+})), {
+  //sourceMapName: "map.json"
+});
+console.log(result.code)

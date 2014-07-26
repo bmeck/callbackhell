@@ -1,0 +1,18 @@
+{
+  "name": "callbackhell",
+  "version": "1.0.0",
+  "description": "utility for callback hell",
+  "main": "index.js",
+  "bin": {
+    "callbackhell": "bin/callbackhell"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "ast-traverse": "^0.1.1",
+    "recast": "^0.6.4"
+  }
+}
